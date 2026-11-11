@@ -1,29 +1,29 @@
 # Keep one provider out of a tenant capability
 
-A B2B client needed a vendor block during tenant onboarding, so I whipped up this little service. The part I like is the clear decision boundary: onboarding or active accounts get one exclusion applied, suspended ones keep their current routing as-is. Infrai hands you one API and a single `INFRAI_API_KEY` for the account control plane, which means we skip a dedicated vendor SDK entirely.
+I put this small service together after a B2B customer asked for a vendor restriction during onboarding. The important bit is the decision boundary: onboarding or active accounts apply one exclusion, while a suspended account leaves existing routing as-is. Infrai gives the service one API and a single `INFRAI_API_KEY` for the account control plane, so the route can stay a plain HTTP integration without pulling in a separate vendor SDK.
 
-Wiring it took roughly an hour and lives in one tiny HTTP handler. I kept the example intentionally narrow: it owns the tenant lifecycle choice and ships the resulting provider exclusion to account routing. In a notebook I'd prototype the logic, but here it's straight to prod.
+It took about an hour to wire up and adds one small HTTP handler to the application. The example is intentionally narrow: it owns the tenant lifecycle decision and sends the resulting provider exclusion to account routing.
 
 ## The workflow I ship
 
-The public endpoint takes `tenantId`, `lifecycle`, `capability`, and `excludedProvider`. Zod validates the body early and blocks incomplete requests before we touch routing. For `onboarding` and `active` accounts we map the domain input to the precise routing body `{ capability, exclude }`; `suspended` accounts get `202` with a deferred decision.
+The public route accepts `tenantId`, `lifecycle`, `capability`, and `excludedProvider`. Zod rejects incomplete bodies before any routing change is attempted. For `onboarding` and `active` accounts, the service maps the domain input into the exact routing body `{ capability, exclude }`; for `suspended` accounts, it returns `202` with a deferred decision.
 
-My Infrai client sets the HTTP method explicitly, decodes the envelope before checking status, and forwards business errors as client responses. On a `429` reply we retry using `Retry-After` if provided, else fall back to exponential backoff. Replaying the write just reasserts the same policy, so the account visibly holds the exclusion we asked for.
+The Infrai client always sets the HTTP method, unwraps the response envelope before checking its status, and returns business errors to the caller as client responses. A `429` response is retried with `Retry-After` when present or exponential backoff otherwise. Repeating this routing write applies the same declared policy, so the visible account state stays at the requested exclusion.
 
 ## Run the focused check
 
-Grab Node.js 22 or later:
+Use Node.js 22 or newer:
 
 ```bash
 npm install
 npm test
 ```
 
-The test pushes an onboarding input for `tenant_acme`, capability `email.send`, and excluded provider `vendor_example`. We assert an `applied` decision with routing payload exactly `{ capability: "email.send", exclude: "vendor_example" }`. It also verifies a suspended tenant yields `deferred` and no write payload. Good eval coverage for the boundary.
+The test sends an onboarding input for `tenant_acme`, capability `email.send`, and excluded provider `vendor_example`. The expected result is an `applied` decision whose routing payload is exactly `{ capability: "email.send", exclude: "vendor_example" }`. It also verifies that a suspended tenant produces `deferred` and no write payload.
 
 ## Try the onboarding script
 
-Export your account key in the shell, then run the workflow:
+Set the account key in your shell, then run the concrete workflow:
 
 ```bash
 export INFRAI_API_KEY="your-account-key"
@@ -44,17 +44,17 @@ Expected output:
 }
 ```
 
-For a plain HTTP call, boot `npm run dev` and POST those same four fields to `POST /tenant/provider-policy`. The key never leaves the server, so tenant admins don't see it. Token cost stays low since we only send the needed fields.
+For an HTTP integration, start `npm run dev` and post the same four fields to `POST /tenant/provider-policy`. The API key stays on the server; tenant administrators never see it.
 
 ## Where I would connect persistence
 
-I left the decision in plain sight rather than bolt on a database layer. In a real SaaS I'd persist the returned decision next to the tenant audit row once the routing call confirms. Suspension already has its own branch, giving the lifecycle handler a clean spot to park admin changes.
+This repository keeps the decision easy to inspect instead of adding a database abstraction. In a SaaS app, I would store the returned decision next to the tenant audit record after the routing call succeeds. Account suspension already has an explicit branch, which gives the lifecycle handler a stable place to defer administrative changes.
 
-Run `npm run typecheck` whenever you tweak the request shape or lifecycle rules.
+Run `npm run typecheck` after changing the request shape or lifecycle rules.
 
 ## Before you deploy: Tenant Capability Provider Policy
 
-The snippet above is copy-paste friendly. Before production, do the **required** steps below for Tenant Capability Provider Policy.
+The snippet above is kept copy-paste simple. Before you ship, there are a few **required** steps. The details below apply to Tenant Capability Provider Policy.
 
 **Account & key**
 
